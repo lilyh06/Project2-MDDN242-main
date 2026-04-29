@@ -66,8 +66,32 @@ new p5(function(p) {
     let loudEvents       = [];
     let frustrationTimer = 0;
     let stars            = [];
-    let relationshipLevel = 0;
-    let fearLevel        = 0;
+    let relationshipLevel = 0;  // 0–100 points
+    let fearLevel        = 0;   // 0–1 float
+    let seenWebs         = new Set([1]); // track which web images have been shown; start with web 1
+
+    // DRAGONFLY
+    let dragonflyImg     = null;
+    let dragonfly = {
+        x: -200, y: 0,
+        speed: 1.8,
+        wiggle: 0,          // wing/body wiggle phase
+        size: 70,
+        alive: true,        // false = being eaten
+        stuck: false,       // caught in web
+        stuckNode: null,
+        dragging: false,
+        offsetX: 0, offsetY: 0,
+        eatTimer: 0,        // counts up while being eaten, size shrinks
+        eaten: false,
+        naturalCatchCooldown: 0,  // prevent instant re-catch
+    };
+    let selectedDragonfly = false;
+
+    // LOUD TRACKING (continuous + burst)
+    let loudStartTime    = null;   // when continuous loud streak began
+    let loudBurstEvents  = [];     // timestamps of loud bursts (for 5-in-1-min check)
+    let lastLoudPenalty  = 0;      // debounce so penalty fires once per event
 
     // FIX: declared at top level so p.setup and p.draw can both access it
     let cloudImg        = null;
@@ -177,14 +201,15 @@ new p5(function(p) {
     const STATES = {
         happy:      { bounceAmt: 0.04,  shakeAmt: 0.0, alphaTarget: 255 },
         neutral:    { bounceAmt: 0.02,  shakeAmt: 0.0, alphaTarget: 180 },
-        distressed: { bounceAmt: 0.01,  shakeAmt: 1.5, alphaTarget: 127 },
+        distressed: { bounceAmt: 0.01,  shakeAmt: 0.5, alphaTarget: 127 }, // reduced from 1.5
         excited:    { bounceAmt: 0.10,  shakeAmt: 0.0, alphaTarget: 255 },
         calm:       { bounceAmt: 0.015, shakeAmt: 0.0, alphaTarget: 255 },
         untrusted:  { bounceAmt: 0.015, shakeAmt: 0.3, alphaTarget: 160 },
         worried:    { bounceAmt: 0.06,  shakeAmt: 0.5, alphaTarget: 200 },
-        frustrated: { bounceAmt: 0.07,  shakeAmt: 1.0, alphaTarget: 200 },
+        frustrated: { bounceAmt: 0.07,  shakeAmt: 0.5, alphaTarget: 200 }, // reduced from 1.0
         comfort:    { bounceAmt: 0.01,  shakeAmt: 0.0, alphaTarget: 255 },
-        fear:       { bounceAmt: 0.00,  shakeAmt: 2.5, alphaTarget: 255 },
+        fear:       { bounceAmt: 0.00,  shakeAmt: 1.0, alphaTarget: 255 }, // reduced from 2.5
+        nap:        { bounceAmt: 0.005, shakeAmt: 0.0, alphaTarget: 220 },
     };
 
     const STATE_DESCRIPTIONS = {
@@ -198,12 +223,25 @@ new p5(function(p) {
         frustrated: 'too loud — irritated, waiting',
         comfort:    "quiet company — bonding, relaxed",
         fear:       "overwhelmed — curled up, scared",
+        nap:        "fast asleep — legs tucked, dreaming",
     };
 
     function getState(c) {
         if (fearLevel > 0.7)                             return "fear";
         if (fearLevel > 0.4 && c.state !== "frustrated") return "distressed";
-        if (!c.isWatched)                                return "worried";
+
+        // Nap: nighttime (11pm–5am), trusted, relationship > 10, not scared
+        let hr = new Date().getHours();
+        let isNight = hr >= 23 || hr < 5;
+        if (isNight && c.trustLevel >= 1 && relationshipLevel > 10 && fearLevel < 0.2 && c.isWatched) {
+            return "nap";
+        }
+
+        // High relationship (>=90pts) gives the spider a 10-minute grace window
+        if (!c.isWatched) {
+            let worryThreshold = relationshipLevel >= 90 ? 10 : 0;
+            if (focusAwayMinutes >= worryThreshold) return "worried";
+        }
         if (c.micLevel > MIC_THRESHOLD)                  return "frustrated";
         if (c.trustLevel >= 1)                           return "calm";
         if (c.trustLevel > 0.2)                          return "untrusted";
@@ -247,6 +285,11 @@ new p5(function(p) {
             micLevel:    0,
             lastVisit:   null,
             totalVisits: 0,
+            selfCleanCooldown: 0,
+            napping:     false,       // true during nighttime nap
+            napEyeAlpha: 255,         // eyelid alpha for closing effect
+            bodyR: 255, bodyG: 126, bodyB: 0,  // current lerped body colour
+            sparkleTimer: 0,          // sparkle pulse counter for happy eyes
         };
     }
 
@@ -274,6 +317,7 @@ new p5(function(p) {
         web2Img       = p.loadImage("web2.png");
         web3Img       = p.loadImage("web3.png");
         web4Img       = p.loadImage("web4.png");
+        dragonflyImg  = p.loadImage("dragonfly.png");
     };
 
 
@@ -307,6 +351,10 @@ new p5(function(p) {
 
         cloudX = p.width + 200;
         cloudY = p.random(20, p.height * 0.4);
+
+        // Dragonfly starts off-screen to the left at a random height
+        dragonfly.x = -150;
+        dragonfly.y = p.random(p.height * 0.15, p.height * 0.65);
 
         let startNode = WEB_NODES[creature.currentNode];
         creature.x = startNode.x * p.width;
@@ -489,10 +537,10 @@ new p5(function(p) {
         // Envelope bounce
         if (envelopeBounce > 0) envelopeBounce *= 0.85;
 
-        // Envelope
+        // Envelope — increased scale from 0.07 to 0.12 for bigger envelope
         if (envelopeImg) {
-            let envW = envelopeImg.width  * 0.07;
-            let envH = envelopeImg.height * 0.07;
+            let envW = envelopeImg.width  * 0.12;
+            let envH = envelopeImg.height * 0.12;
             let envX = (p.width  - envW) / 2;
             let envY =  p.height - envH - 15;
             envelopeBounds = { x: envX, y: envY, w: envW, h: envH };
@@ -516,9 +564,13 @@ if (Date.now() > nextDebrisSpawn) {
     // Base random delay: 5–20 seconds
     let delay = p.random(5000, 20000);
 
-    // If raining → spawn 2× to 3× faster
-    if (rainActive) {
-        delay *= 0.35;   // 35% of normal delay
+    // Bad weather → debris falls much more often, overwhelming the spider
+    if (rainActive && WIND_CODES.has(code)) {
+        delay *= 0.15;   // storm: very rapid debris — hard for spider to cope alone
+    } else if (rainActive) {
+        delay *= 0.30;   // rain: noticeably faster
+    } else if (WIND_CODES.has(code)) {
+        delay *= 0.40;   // wind alone: moderately faster
     }
 
     // If user is away then spawn faster
@@ -532,23 +584,26 @@ if (Date.now() > nextDebrisSpawn) {
 
         updateDebris();
 
-        // Clouds
+        // Clouds — always moving right-to-left; fade in when cloudy, fade out on clear
         if (cloudy) {
-            cloudsActive = true;
-            cloudAlpha   = p.lerp(cloudAlpha, 255, 0.02);
+            cloudAlpha = p.lerp(cloudAlpha, 255, 0.02);
         } else {
-            cloudAlpha = p.lerp(cloudAlpha, 0, 0.02);
-            if (cloudAlpha < 1) cloudsActive = false;
+            cloudAlpha = p.lerp(cloudAlpha, 0, 0.015); // gentle fade-out on clear sky
         }
-        if (cloudsActive && cloudImg) {
+
+        // Keep cloud moving at all times so it loops even while fading
+        if (cloudImg) {
             cloudX -= cloudSpeed;
-            if (cloudX < -p.width) {
-                cloudX = p.width + 50;
+            // Loop back from left edge to right edge
+            if (cloudX + cloudImg.width * 1.2 < 0) {
+                cloudX = p.width + p.random(50, 200);
                 cloudY = p.random(20, p.height * 0.4);
             }
-            p.tint(255, cloudAlpha);
-            p.image(cloudImg, cloudX, cloudY, cloudImg.width * 1.2, cloudImg.height * 1.2);
-            p.noTint();
+            if (cloudAlpha > 1) {
+                p.tint(255, cloudAlpha);
+                p.image(cloudImg, cloudX, cloudY, cloudImg.width * 1.2, cloudImg.height * 1.2);
+                p.noTint();
+            }
         }
 
         // Rain
@@ -557,6 +612,7 @@ if (Date.now() > nextDebrisSpawn) {
         // Creature update + draw
         updateMic(creature);
         updateCreature(creature);
+        updateDragonfly();   // update + draw dragonfly (spider renders on top)
 
         // Calm company tracking
         if (creature.isWatched && creature.micLevel < 0.05 && frustrationTimer === 0) {
@@ -571,7 +627,7 @@ if (Date.now() > nextDebrisSpawn) {
         }
 
         // FIX: web trust fade — moved INSIDE p.draw so it runs every frame
-        if (!webFading && currentWeb !== 1 && relationshipLevel < 0.05) {
+        if (!webFading && currentWeb !== 1 && relationshipLevel < 5) {
             targetWeb     = 1;
             webFading     = true;
             fadeStartTime = Date.now();
@@ -591,6 +647,124 @@ if (Date.now() > nextDebrisSpawn) {
 
         if (p.frameCount % 6 === 0) updateSidebar(creature);
     };
+
+
+    // ============================================================
+    //  DRAGONFLY
+    // ============================================================
+
+    function resetDragonfly() {
+        dragonfly.x        = -150;
+        dragonfly.y        = p.random(p.height * 0.15, p.height * 0.65);
+        dragonfly.speed    = p.random(1.4, 2.4);
+        dragonfly.alive    = true;
+        dragonfly.stuck    = false;
+        dragonfly.stuckNode = null;
+        dragonfly.dragging = false;
+        dragonfly.eatTimer = 0;
+        dragonfly.eaten    = false;
+        dragonfly.size     = 70;
+        dragonfly.naturalCatchCooldown = p.random(600, 1800); // 10–30s before it can be caught
+    }
+
+    function updateDragonfly() {
+        if (!dragonflyImg) return;
+
+        let df = dragonfly;
+        df.wiggle += 0.18; // wing/body animation phase
+
+        // ── Cooldown tick ──
+        if (df.naturalCatchCooldown > 0) df.naturalCatchCooldown--;
+
+        // ── Being eaten ──
+        if (df.eaten) {
+            df.eatTimer++;
+            // Spider hovers over it — keep creature positioned here
+            creature.x = p.lerp(creature.x, df.x, 0.05);
+            creature.y = p.lerp(creature.y, df.y, 0.05);
+            df.size = p.lerp(df.size, 0, 0.03);
+            if (df.size < 3) {
+                // Fully eaten — relationship boost, reset dragonfly
+                relationshipLevel = Math.min(100, relationshipLevel + 5);
+                resetDragonfly();
+            }
+            // Draw shrinking dragonfly
+            p.push();
+            p.translate(df.x, df.y);
+            p.rotate(Math.sin(df.wiggle * 0.3) * 0.08);
+            p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
+            p.pop();
+            return;
+        }
+
+        // ── Stuck in web ──
+        if (df.stuck) {
+            // Soft wiggle in place
+            let wx = Math.sin(df.wiggle * 0.8) * 3;
+            let wy = Math.cos(df.wiggle * 0.6) * 2;
+            p.push();
+            p.translate(df.x + wx, df.y + wy);
+            p.rotate(Math.sin(df.wiggle * 0.4) * 0.12);
+            p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
+            p.pop();
+
+            // Spider within eating range → start eating
+            let distToSpider = p.dist(creature.x, creature.y, df.x, df.y);
+            if (distToSpider < CREATURE_SIZE * 0.9) {
+                df.eaten = true;
+            }
+            return;
+        }
+
+        // ── Dragging by user ──
+        if (df.dragging) {
+            df.x = p.mouseX + df.offsetX;
+            df.y = p.mouseY + df.offsetY;
+            p.push();
+            p.translate(df.x, df.y);
+            p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
+            p.pop();
+            return;
+        }
+
+        // ── Flying freely left → right ──
+        df.x += df.speed;
+        // Gentle sine wave vertical drift + wing wiggle
+        df.y += Math.sin(df.wiggle * 0.5) * 0.6;
+
+        // Draw with wing-flap scale pulse and slight rotation
+        let wingScale = 1 + Math.sin(df.wiggle * 2.5) * 0.08;
+        p.push();
+        p.translate(df.x, df.y);
+        p.rotate(Math.sin(df.wiggle * 0.4) * 0.07);
+        p.scale(wingScale, 1);
+        p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
+        p.pop();
+
+        // ── Natural catch: low probability when dragonfly crosses near a web node ──
+        if (df.naturalCatchCooldown <= 0) {
+            for (let n of WEB_NODES) {
+                let nx = n.x * p.width;
+                let ny = n.y * p.height;
+                if (p.dist(df.x, df.y, nx, ny) < 40) {
+                    // ~0.3% chance per frame when within range — feels rare and natural
+                    if (p.random() < 0.003) {
+                        df.stuck     = true;
+                        df.stuckNode = n.id;
+                        df.x         = nx;
+                        df.y         = ny;
+                        creature.returningHome = false; // spider turns toward it
+                        return;
+                    }
+                }
+            }
+        }
+
+        // ── Loop: wrap back to left when fully off right edge ──
+        if (df.x > p.width + 150) {
+            resetDragonfly();
+        }
+    }
 
 
     // ============================================================
@@ -671,13 +845,24 @@ if (c.celebrateTimer > 0) {
             return;
         }
 
-        // Celebration orbit during web fade
+        // Celebration orbit during web fade — slow gentle circles
         if (webFading) {
-            c.orbitAngle += 0.2;
+            c.orbitAngle += 0.07;  // was 0.2 — much slower, more graceful
             c.x = p.width  / 2 + Math.cos(c.orbitAngle) * 80;
             c.y = p.height / 2 + Math.sin(c.orbitAngle) * 80;
             return;
         }
+
+        // Nap: spider stops and stays at hub node
+        if (c.state === "nap") {
+            c.napping = true;
+            let hub = WEB_NODES[0];
+            c.x = p.lerp(c.x, hub.x * p.width,  0.03);
+            c.y = p.lerp(c.y, hub.y * p.height, 0.03);
+            c.breathe += 0.005; // very slow breathing
+            return;
+        }
+        c.napping = false;
 
         // Frustration cooldown
         if (frustrationTimer > 0) {
@@ -712,14 +897,16 @@ if (c.celebrateTimer > 0) {
             c.trustLevel = Math.max(0, c.trustLevel - loss);
         }
 
-        // Relationship meter
+        // Relationship meter — passive calm presence still slowly builds it,
+        // but active actions (debris, bouquet, visits) are the main drivers.
+        // Decay is gentle so hard-earned points aren't lost too quickly.
         if (c.state === "calm" && c.micLevel < 0.05 && c.isWatched) {
-            relationshipLevel = Math.min(1, relationshipLevel + 0.0005);
+            relationshipLevel = Math.min(100, relationshipLevel + 0.003); // slow passive build
         } else {
-            relationshipLevel = Math.max(0, relationshipLevel - 0.001);
+            relationshipLevel = Math.max(0, relationshipLevel - 0.005);   // gentle decay
         }
         if (!c.isWatched || c.state === "frustrated" || c.micLevel > MIC_THRESHOLD) {
-            relationshipLevel = Math.max(0, relationshipLevel - 0.001);
+            relationshipLevel = Math.max(0, relationshipLevel - 0.005);
         }
 
         // Comfort mode
@@ -732,14 +919,31 @@ if (c.celebrateTimer > 0) {
         }
 
         // Fear / frustration from debris
-       if (stuckCount >= 6) {
-    fearLevel = Math.min(1, fearLevel + 0.002); // 10× slower
+        // In bad weather the threshold lowers — storms make the spider more anxious
+        let fearThreshold = (rainActive || WIND_CODES.has(weatherData?.current?.weather_code ?? -1)) ? 6 : 8;
+        let frustThreshold = fearThreshold - 2; // frustrated 2 below fear threshold
+        if (stuckCount > fearThreshold) {
+            fearLevel = Math.min(1, fearLevel + 0.002);
         } else {
             fearLevel = Math.max(0, fearLevel - 0.01);
         }
-       if (stuckCount >= 4 && stuckCount < 6) {
-    c.state = "frustrated";
-}
+        if (stuckCount >= frustThreshold && stuckCount <= fearThreshold) {
+            c.state = "frustrated";
+        }
+
+        // Self-cleaning: if fewer than 5 debris stuck, spider slowly removes one
+        // when it arrives at a node that has debris on it (why it values human help)
+        if (stuckCount > 0 && stuckCount < 5) {
+            let currentNodeId = c.currentNode;
+            let debrisHere = debris.find(d => d.stuck && d.stuckNode === currentNodeId);
+            if (debrisHere && !c.selfCleanCooldown) {
+                // Spider pauses briefly then removes the debris
+                c.selfCleanCooldown = 300; // ~5 seconds at 60fps before it can clean again
+                // Delay the actual removal by 120 frames so it looks intentional
+                debrisHere.selfCleanTimer = 120;
+            }
+        }
+        if (c.selfCleanCooldown > 0) c.selfCleanCooldown--;
 
 
         // State + animation
@@ -795,7 +999,7 @@ if (c.celebrateTimer > 0) {
             y:        -20,
             img:      img,
             size:     p.random(28, 48),
-            speed:    p.random(2.2, 4.0),
+            speed:    p.random(0.8, 1.8),  // reduced from (2.2, 4.0) — falls slower
             rotation: p.random(-0.1, 0.1),
             angle:    0,
             stuck:    false,
@@ -834,6 +1038,16 @@ if (c.celebrateTimer > 0) {
             }
 
             if (d.stuck) {
+                // Self-clean countdown — spider removes this debris on its own
+                if (d.selfCleanTimer !== undefined && d.selfCleanTimer > 0) {
+                    d.selfCleanTimer--;
+                    if (d.selfCleanTimer <= 0) {
+                        // Mark for removal — release it falling off the web
+                        d.stuck    = false;
+                        d.released = true;
+                        d.speed    = p.random(1.0, 2.0);
+                    }
+                }
                 p.push();
                 if (windActive) p.translate(Math.sin(windSway) * 4, Math.cos(windSway) * 2);
                 p.image(d.img, d.x - d.size / 2, d.y - d.size / 2, d.size, d.size);
@@ -861,11 +1075,13 @@ if (c.celebrateTimer > 0) {
             p.image(d.img, d.x - d.size / 2, d.y - d.size / 2, d.size, d.size);
         }
 
-        // Track rapid debris falls once per frame, not once per debris item
+        // Track rapid debris falls — only scary if already overwhelmed (>5 stuck)
         let now = Date.now();
         if (anyFalling) recentDebrisFalls.push(now);
         recentDebrisFalls = recentDebrisFalls.filter(t => now - t < 3000);
-        if (recentDebrisFalls.length >= 5) fearLevel = Math.min(1, fearLevel + 0.25);
+        if (recentDebrisFalls.length >= 8 && debris.filter(d => d.stuck).length > 5) {
+            fearLevel = Math.min(1, fearLevel + 0.25);
+        }
         fearLevel = Math.max(0, fearLevel - 0.002);
 
         debris = debris.filter(d => d.y < p.height + 40);
@@ -877,14 +1093,33 @@ if (c.celebrateTimer > 0) {
     // ============================================================
 
     function startWebFade() {
-        if (creature.state === "calm")       targetWeb = 4;
-        else if (creature.state === "frustrated") targetWeb = 3;
-        else                                  targetWeb = 2;
+        // All available web indices (expand this list as you add more web images)
+        const ALL_WEBS = [1, 2, 3, 4];
+
+        // Relationship > 50: bias toward webs the spider hasn't shown before
+        if (relationshipLevel >= 50) {
+            let unseen = ALL_WEBS.filter(w => !seenWebs.has(w) && w !== currentWeb);
+            if (unseen.length > 0) {
+                // Prefer an unseen web — spider is comfortable enough to share something new
+                targetWeb = p.random(unseen);
+            } else {
+                // All webs seen — pick any non-current one at random
+                let opts = ALL_WEBS.filter(w => w !== currentWeb);
+                targetWeb = p.random(opts);
+            }
+        } else {
+            // Low relationship — stick to the basics (web 2 or 3 only)
+            if (creature.state === "calm")            targetWeb = 2;
+            else if (creature.state === "frustrated") targetWeb = 3;
+            else                                      targetWeb = 2;
+        }
+
+        seenWebs.add(targetWeb); // mark this web as seen
 
         webFading     = true;
         fadeStartTime = Date.now();
         webFade       = 0;
-        fadeDuration  = 20000;
+        fadeDuration  = 15000;  // was 20s — a few seconds shorter
         creature.exciteTimer = 600;
     }
 
@@ -927,6 +1162,36 @@ if (c.celebrateTimer > 0) {
     // ============================================================
 
     function drawCreature(c) {
+        // ── Dynamic size: smaller base, grows with relationship ──
+        // Base = 80, max = 120 at relationship 100
+        let dynamicSize = 80 + (relationshipLevel / 100) * 40;
+
+        // ── Body colour lerp: orange→purple (fear), orange→yellow (calm/happy) ──
+        let targetR, targetG, targetB;
+        if (c.state === "fear" || c.state === "distressed") {
+            // Purple-ish
+            targetR = 160; targetG = 60; targetB = 200;
+        } else if (c.state === "calm" || c.state === "comfort" || c.state === "nap") {
+            // Warm yellow
+            targetR = 255; targetG = 210; targetB = 40;
+        } else if (c.state === "happy") {
+            // Slightly gold
+            targetR = 255; targetG = 190; targetB = 60;
+        } else {
+            // Default orange
+            targetR = 255; targetG = 126; targetB = 0;
+        }
+        c.bodyR = p.lerp(c.bodyR, targetR, 0.03);
+        c.bodyG = p.lerp(c.bodyG, targetG, 0.03);
+        c.bodyB = p.lerp(c.bodyB, targetB, 0.03);
+
+        // ── Sparkle timer for happy/calm eyes ──
+        if ((c.state === "happy" || c.state === "calm") && relationshipLevel >= 30) {
+            c.sparkleTimer += 1;
+        } else {
+            c.sparkleTimer = 0;
+        }
+
         p.push();
         p.translate(c.x, c.y);
         p.translate(0, p.sin(c.bob) * 4);
@@ -941,7 +1206,7 @@ if (c.celebrateTimer > 0) {
             p.translate(p.random(-3, 3), p.random(-1.5, 1.5));
         }
 
-        let s = STATES[c.state];
+        let s = STATES[c.state] || STATES.neutral;
         let bScale = 1 + p.sin(c.breathe) * c.bounceAmt;
 
         if (s.shakeAmt > 0) {
@@ -950,16 +1215,16 @@ if (c.celebrateTimer > 0) {
                 p.random(-s.shakeAmt * 0.4, s.shakeAmt * 0.4)
             );
         }
-        if (c.state === "frustrated") p.translate(p.random(-3, 3), p.random(-1, 1));
+        if (c.state === "frustrated") p.translate(p.random(-1.5, 1.5), p.random(-0.5, 0.5));
         if (c.state === "worried")    p.translate(p.random(-1, 1), p.random(-0.5, 0.5));
-        if (c.state === "fear")       p.translate(p.random(-4, 4), p.random(-2, 2));
+        if (c.state === "fear")       p.translate(p.random(-2, 2), p.random(-1, 1));
 
         let cur   = WEB_NODES[c.currentNode];
         let tgt   = WEB_NODES[c.targetNode];
         let angle = Math.atan2((tgt.y - cur.y) * p.height, (tgt.x - cur.x) * p.width);
         p.rotate(angle + p.HALF_PI);
 
-        let sc = CREATURE_SIZE / 55.0 * bScale;
+        let sc = dynamicSize / 55.0 * bScale;
         p.scale(sc);
 
         drawSpider(c);
@@ -973,30 +1238,55 @@ if (c.celebrateTimer > 0) {
 
     function drawSpider(c) {
         let alpha   = c.bodyAlpha;
-        let legSway = p.sin(c.breathe * 1.3) * 2.5;
-        drawLegs(alpha, legSway, c);
+        let isNapping = c.state === "nap";
+
+        if (isNapping) {
+            // Legs tuck in close to body
+            drawLegsNap(alpha, c);
+        } else {
+            let legSway = p.sin(c.breathe * 1.3) * 2.5;
+            drawLegs(alpha, legSway, c);
+        }
         drawPedipalps(alpha);
-        drawBody(alpha);
-        drawEyes(c, alpha);
+        drawBody(alpha, c);
+        drawEyes(c, alpha, isNapping);
     }
 
     function drawLegs(alpha, sway, c) {
         p.strokeWeight(1.5);
         p.noFill();
         let brace = spiderBracing ? 6 : 0;
-        // FIX: apply state modifiers before using sway, not after
         if (c.state === "frustrated") sway *= 0.3;
         if (c.state === "fear")       sway  = 0;
+        // Fear: legs partially tucked — shorter reach, pulled inward
+        let fearTuck = (c.state === "fear") ? 0.55 : 1.0;
         let ls = sway + brace;
         let rs = -sway - brace;
-        drawLeg(-8,  -8,  -16, -20+ls, -30, -22+ls, -32, -16+ls, alpha);
-        drawLeg(-10, -2,  -20,  -8+ls, -34,  -4+ls, -38,   3+ls, alpha);
-        drawLeg(-10,  4,  -18,  10+ls, -30,  18+ls, -34,  26+ls, alpha);
-        drawLeg(-8,  10,  -14,  20+ls, -20,  30+ls, -20,  38+ls, alpha);
-        drawLeg( 8,  -8,   16, -20+rs,  30, -22+rs,  32, -16+rs, alpha);
-        drawLeg(10,  -2,   20,  -8+rs,  34,  -4+rs,  38,   3+rs, alpha);
-        drawLeg(10,   4,   18,  10+rs,  30,  18+rs,  34,  26+rs, alpha);
-        drawLeg( 8,  10,   14,  20+rs,  20,  30+rs,  20,  38+rs, alpha);
+        p.stroke(...BLACK, alpha);
+        drawLeg(-8*fearTuck,  -8,  -14*fearTuck, -16+ls, -24*fearTuck, -18+ls, -26*fearTuck, -12+ls, alpha);
+        drawLeg(-10*fearTuck, -2,  -16*fearTuck,  -6+ls, -28*fearTuck,  -2+ls, -30*fearTuck,   4+ls, alpha);
+        drawLeg(-10*fearTuck,  4,  -14*fearTuck,   8+ls, -24*fearTuck,  14+ls, -26*fearTuck,  20+ls, alpha);
+        drawLeg(-8*fearTuck,  10,  -10*fearTuck,  16+ls, -16*fearTuck,  22+ls, -16*fearTuck,  28+ls, alpha);
+        drawLeg( 8*fearTuck,  -8,   14*fearTuck, -16+rs,  24*fearTuck, -18+rs,  26*fearTuck, -12+rs, alpha);
+        drawLeg(10*fearTuck,  -2,   16*fearTuck,  -6+rs,  28*fearTuck,  -2+rs,  30*fearTuck,   4+rs, alpha);
+        drawLeg(10*fearTuck,   4,   14*fearTuck,   8+rs,  24*fearTuck,  14+rs,  26*fearTuck,  20+rs, alpha);
+        drawLeg( 8*fearTuck,  10,   10*fearTuck,  16+rs,  16*fearTuck,  22+rs,  16*fearTuck,  28+rs, alpha);
+    }
+
+    // Nap: legs fully tucked under body — small folded curves
+    function drawLegsNap(alpha, c) {
+        p.strokeWeight(1.2);
+        p.noFill();
+        p.stroke(...BLACK, alpha * 0.7);
+        // Very short tucked legs, barely visible under the body
+        drawLeg(-6, -6,  -10, -10, -14, -10,  -13, -6,  alpha * 0.7);
+        drawLeg(-7, -1,  -11,  -3, -14,  -1,  -13,  3,  alpha * 0.7);
+        drawLeg(-7,  4,  -11,   7, -13,  10,  -12, 14,  alpha * 0.7);
+        drawLeg(-6,  9,   -9,  12, -12,  14,  -11, 18,  alpha * 0.7);
+        drawLeg( 6, -6,   10, -10,  14, -10,   13, -6,  alpha * 0.7);
+        drawLeg( 7, -1,   11,  -3,  14,  -1,   13,  3,  alpha * 0.7);
+        drawLeg( 7,  4,   11,   7,  13,  10,   12, 14,  alpha * 0.7);
+        drawLeg( 6,  9,    9,  12,  12,  14,   11, 18,  alpha * 0.7);
     }
 
     function drawLeg(x0,y0,cx1,cy1,cx2,cy2,x3,y3,alpha) {
@@ -1022,11 +1312,16 @@ if (c.celebrateTimer > 0) {
         p.endShape();
     }
 
-    function drawBody(alpha) {
+    function drawBody(alpha, c) {
+        let br = c ? c.bodyR : 255;
+        let bg = c ? c.bodyG : 126;
+        let bb = c ? c.bodyB : 0;
+        // Secondary colour (head): slightly darker version of body colour
+        let hr = br * 0.75, hg = bg * 0.67, hb = bb * 0.6;
         p.noStroke();
-        p.fill(...BODY_COL, alpha);
+        p.fill(br, bg, bb, alpha);
         p.ellipse(0, 9, 32, 30);
-        p.fill(190, 85, 0, alpha);
+        p.fill(hr, hg, hb, alpha);
         p.ellipse(0, -7, 24, 20);
         p.stroke(...BLACK, alpha * 0.5);
         p.strokeWeight(0.8);
@@ -1038,17 +1333,42 @@ if (c.celebrateTimer > 0) {
         p.ellipse(0, 1, 7, 6);
     }
 
-    function drawEyes(c, alpha) {
-        let dx     = p.mouseX - c.x;
-        let dy     = p.mouseY - c.y;
-        let angle  = Math.atan2(dy, dx);
-        let lookX  = Math.cos(angle) * 1.2;
-        let lookY  = Math.sin(angle) * 1.2;
+    function drawEyes(c, alpha, isNapping) {
+        // Eyes follow dragonfly if it's on screen and closer than the cursor
+        let targetX = p.mouseX;
+        let targetY = p.mouseY;
+        if (dragonflyImg && !dragonfly.eaten) {
+            let dfDist    = p.dist(c.x, c.y, dragonfly.x, dragonfly.y);
+            let mouseDist = p.dist(c.x, c.y, p.mouseX, p.mouseY);
+            if (dragonfly.x > -50 && dragonfly.x < p.width + 50 && dfDist < mouseDist) {
+                targetX = dragonfly.x;
+                targetY = dragonfly.y;
+            }
+        }
+        let dx    = targetX - c.x;
+        let dy    = targetY - c.y;
+        let angle = Math.atan2(dy, dx);
+        let lookX = Math.cos(angle) * 1.2;
+        let lookY = Math.sin(angle) * 1.2;
         let pupilBig = c.state === 'excited';
         let squash   = c.state === "frustrated" ? 0.6 : c.state === "fear" ? 0.4 : 1.0;
 
         let front = [[-7,-11],[-2.5,-13],[2.5,-13],[7,-11]];
         let back  = [[-6,-7.5],[-2,-9],[2,-9],[6,-7.5]];
+
+        if (isNapping) {
+            // Draw closed eyelids — simple horizontal lines through each eye position
+            p.stroke(...BLACK, alpha * 0.8);
+            p.strokeWeight(1.8);
+            for (let [ex,ey] of front) {
+                p.noFill();
+                p.line(ex - 2.4, ey, ex + 2.4, ey);
+            }
+            for (let [ex,ey] of back) {
+                p.line(ex - 1.4, ey, ex + 1.4, ey);
+            }
+            return;
+        }
 
         for (let [ex,ey] of front) {
             p.noStroke();
@@ -1064,6 +1384,20 @@ if (c.celebrateTimer > 0) {
             p.fill(...BLACK, alpha);
             p.ellipse(ex + lookX, ey + lookY, pupilBig ? 1.6 : 0.9);
         }
+
+        // ── Sparkle: tiny star glints when happy/calm + relationship > 30 ──
+        if (c.sparkleTimer > 0 && relationshipLevel >= 30) {
+            let sparkPulse = Math.sin(c.sparkleTimer * 0.08);
+            if (sparkPulse > 0.7) {
+                p.noStroke();
+                p.fill(255, 255, 220, alpha * sparkPulse);
+                // Small cross-star on the two main front eyes
+                for (let [ex,ey] of [front[1], front[2]]) {
+                    let sz = 1.8 * sparkPulse;
+                    p.ellipse(ex - 1.5, ey - 1.5, sz, sz);
+                }
+            }
+        }
     }
 
 
@@ -1074,7 +1408,34 @@ if (c.celebrateTimer > 0) {
     function onCanvasClick() {
         if (!micActive) startMic();
         let d = p.dist(p.mouseX, p.mouseY, creature.x, creature.y);
-        if (d < CREATURE_SIZE * 0.7) creature.need = p.max(0, creature.need - CLICK_FEED);
+
+        if (d < CREATURE_SIZE * 0.7) {
+            // Clicked directly on spider — it flees to the furthest node from cursor
+            let farNode = WEB_NODES.reduce((best, n) => {
+                let nd = p.dist(n.x * p.width, n.y * p.height, p.mouseX, p.mouseY);
+                let bd = p.dist(best.x * p.width, best.y * p.height, p.mouseX, p.mouseY);
+                return nd > bd ? n : best;
+            }, WEB_NODES[0]);
+
+            creature.targetNode    = farNode.id;
+            creature.previousNode  = creature.currentNode;
+            creature.edgeT         = 0;
+            creature.returningHome = false;
+
+            // Brief speed burst so the flee looks snappy
+            travelSpeed = BASE_SPEED * 5;
+            setTimeout(() => { travelSpeed = BASE_SPEED; }, 1200);
+
+            // Relationship penalty: -5 points if any have been earned
+            if (relationshipLevel > 0) {
+                relationshipLevel = Math.max(0, relationshipLevel - 5);
+            }
+            // Feeding click only applies when NOT clicking on spider directly
+            return;
+        }
+
+        // Normal feed click (not on spider)
+        creature.need = p.max(0, creature.need - CLICK_FEED);
     }
 
 
@@ -1083,6 +1444,16 @@ if (c.celebrateTimer > 0) {
     // ============================================================
 
     p.mousePressed = function() {
+        // Dragonfly grab — if flying freely and user clicks on it
+        if (dragonflyImg && !dragonfly.stuck && !dragonfly.eaten && !dragonfly.dragging) {
+            if (p.dist(p.mouseX, p.mouseY, dragonfly.x, dragonfly.y) < dragonfly.size * 0.7) {
+                dragonfly.dragging = true;
+                dragonfly.offsetX  = dragonfly.x - p.mouseX;
+                dragonfly.offsetY  = dragonfly.y - p.mouseY;
+                selectedDragonfly  = true;
+            }
+        }
+
         for (let d of debris) {
             if (p.dist(p.mouseX, p.mouseY, d.x, d.y) < d.size) {
                 selectedDebris  = d;
@@ -1102,6 +1473,10 @@ if (c.celebrateTimer > 0) {
     };
 
     p.mouseDragged = function() {
+        if (dragonfly.dragging) {
+            dragonfly.x = p.mouseX + dragonfly.offsetX;
+            dragonfly.y = p.mouseY + dragonfly.offsetY;
+        }
         if (bouquet && bouquet.dragging) {
             bouquet.x = p.mouseX + bouquet.offsetX;
             bouquet.y = p.mouseY + bouquet.offsetY;
@@ -1113,6 +1488,29 @@ if (c.celebrateTimer > 0) {
     };
 
     p.mouseReleased = function() {
+        // Dragonfly release — snap to nearest web node if dropped close enough
+        if (dragonfly.dragging) {
+            dragonfly.dragging = false;
+            selectedDragonfly  = false;
+            let snapped = false;
+            for (let n of WEB_NODES) {
+                let nx = n.x * p.width;
+                let ny = n.y * p.height;
+                if (p.dist(dragonfly.x, dragonfly.y, nx, ny) < 50) {
+                    dragonfly.stuck     = true;
+                    dragonfly.stuckNode = n.id;
+                    dragonfly.x         = nx;
+                    dragonfly.y         = ny;
+                    snapped = true;
+                    break;
+                }
+            }
+            if (!snapped) {
+                // Not near a node — release it to fly on freely
+                dragonfly.stuck = false;
+            }
+        }
+
 // Bouquet drop
 if (bouquet && bouquet.dragging) {
     bouquet.dragging = false;
@@ -1120,10 +1518,10 @@ if (bouquet && bouquet.dragging) {
 
     if (d < CREATURE_SIZE * 1.2 && creature.trustLevel >= 0.3) {
 
-        // Calm + relationship boost
+        // Calm + relationship boost: bouquet = +5 relationship points
         creature.state = "comfort";
         creature.trustLevel = Math.min(1, creature.trustLevel + 0.4);
-        relationshipLevel = Math.min(1, relationshipLevel + 0.5);
+        relationshipLevel = Math.min(100, relationshipLevel + 5);
         fearLevel = Math.max(0, fearLevel - 0.5);
         frustrationTimer = 0;
 
@@ -1150,6 +1548,11 @@ if (bouquet && bouquet.dragging) {
                 envelopeBounce = 1;
                 if (selectedDebris.img === debrisImg1) debris1Count++;
                 if (selectedDebris.img === debrisImg2) debris2Count++;
+
+                // +1 relationship for actively cleaning debris once trust is established
+                if (creature.trustLevel >= 1) {
+                    relationshipLevel = Math.min(100, relationshipLevel + 1);
+                }
 
                 if (debris1Count + debris2Count >= 10 && !bouquetAvailable) {
                     bouquetAvailable = true;
@@ -1197,13 +1600,39 @@ if (bouquet && bouquet.dragging) {
     function updateMic(c) {
         if (!micActive) return;
         c.micLevel = getMicLevel();
+        let now = Date.now();
+
         if (c.micLevel > MIC_THRESHOLD) {
-            loudEvents.push(Date.now());
-            loudEvents = loudEvents.filter(t => Date.now() - t < 60000);
+            // Existing frustration logic
+            loudEvents.push(now);
+            loudEvents = loudEvents.filter(t => now - t < 60000);
             if (loudEvents.length >= 3) { frustrationTimer = 60 * 60; loudEvents = []; }
             if (c.micLevel * 100 > 50) fearLevel = Math.min(1, fearLevel + 0.15);
             c.freezeTimer   = 120;
             c.returningHome = true;
+
+            // ── Continuous loud penalty (20 seconds straight) ──
+            if (loudStartTime === null) loudStartTime = now;
+            if (now - loudStartTime >= 20000 && now - lastLoudPenalty > 25000) {
+                if (c.micLevel * 100 > 20) {  // only if meter is above 20
+                    relationshipLevel = Math.max(0, relationshipLevel - 10);
+                    lastLoudPenalty   = now;
+                }
+            }
+
+            // ── Burst penalty: 5+ loud events in 1 min above 20 on meter ──
+            if (c.micLevel * 100 > 20) {
+                loudBurstEvents.push(now);
+                loudBurstEvents = loudBurstEvents.filter(t => now - t < 60000);
+                if (loudBurstEvents.length >= 5 && now - lastLoudPenalty > 15000) {
+                    relationshipLevel = Math.max(0, relationshipLevel - 10);
+                    lastLoudPenalty   = now;
+                    loudBurstEvents   = [];
+                }
+            }
+        } else {
+            // Reset continuous streak when quiet
+            loudStartTime = null;
         }
     }
 
@@ -1216,6 +1645,7 @@ if (bouquet && bouquet.dragging) {
         try {
             localStorage.setItem('creature_v2', JSON.stringify({
                 need: c.need, lastVisit: Date.now(), totalVisits: c.totalVisits,
+                relationshipLevel: relationshipLevel,
             }));
         } catch(e) {}
     }
@@ -1228,6 +1658,10 @@ if (bouquet && bouquet.dragging) {
             c.need        = data.need        || 50;
             c.totalVisits = (data.totalVisits || 0) + 1;
             c.lastVisit   = data.lastVisit   || null;
+
+            // Restore relationship, then award +2 for returning (capped at 100)
+            relationshipLevel = data.relationshipLevel || 0;
+            relationshipLevel = Math.min(100, relationshipLevel + 2);
 
             // FIX: guard against null lastVisit before using it
             if (c.lastVisit) {
@@ -1256,7 +1690,7 @@ if (bouquet && bouquet.dragging) {
     function updateSidebar(c) {
         // Icon value labels (in state card)
         let relVal = document.getElementById("ui-relationship-val");
-        if (relVal) relVal.textContent = Math.floor(relationshipLevel * 100);
+        if (relVal) relVal.textContent = Math.floor(relationshipLevel);
 
         let fearVal = document.getElementById("ui-fear-val");
         if (fearVal) fearVal.textContent = Math.floor(fearLevel * 100);
@@ -1268,7 +1702,7 @@ if (bouquet && bouquet.dragging) {
         let relBar   = document.getElementById("ui-relationship-bar");
         let fearBar  = document.getElementById("ui-fear-bar");
         let noiseBar = document.getElementById("ui-noise-bar");
-        if (relBar)   { relBar.style.width   = (relationshipLevel * 100) + "%"; relBar.style.background   = colorFor(relationshipLevel); }
+        if (relBar)   { relBar.style.width   = relationshipLevel + "%"; relBar.style.background   = colorFor(relationshipLevel / 100); }
         if (fearBar)  { fearBar.style.width  = (fearLevel * 100)         + "%"; fearBar.style.background  = colorFor(fearLevel);         }
         if (noiseBar) { noiseBar.style.width = Math.min(100, c.micLevel * 100) + "%"; noiseBar.style.background = colorFor(c.micLevel);  }
 
@@ -1315,6 +1749,9 @@ if (bouquet && bouquet.dragging) {
         if (connBar) connBar.style.width = (connectionLevel * 100) + "%";
         let connVal = document.getElementById("ui-connection-val");
         if (connVal) connVal.textContent = Math.floor(connectionLevel * 100);
+
+        let relDisplay = document.getElementById("ui-relationship-display");
+        if (relDisplay) relDisplay.textContent = Math.floor(relationshipLevel);
 
         // Time away
         if (ui.away) {

@@ -99,3 +99,38 @@ ____________
 | **distressed** | curled posture, slow rocking |
 | **fear** (new) | full curl, tiny eyes, no movement |
 | **comfort** (new) | soft bobbing, relaxed legs, half‑closed eyes |
+
+
+---------------
+points survive page refreshes.
+The four earning actions:
+
+Debris into envelope → +1 point, but only once trust is fully established (trustLevel >= 1), so casual clicking before the spider is calm doesn't count
+Bouquet delivery → +5 points (was effectively a one-off 0.5 on a 0–1 scale)
+Each return visit → +2 points loaded from saved state on every page open
+Passive calm presence → still builds very slowly (+0.003/frame) as before, but it's no longer the main driver
+
+---
+Spider is now frustrated at 6–8 stuck debris (was 4+)
+Spider reaches fear only at 8+ stuck debris (was 6+)
+The rapid-fall fear spike also only triggers if there are already 5+ stuck debris on the web
+-----
+Spider self-cleaning:
+
+When fewer than 5 debris are stuck, the spider will slowly remove them on its own.
+When it arrives at a node that has debris on it, it pauses for a second(ish) then dislodges the piece.
+There's a 5-second cooldown between each self-clean so it feels deliberate rather than instant and rushed.
+This is why the spider appreciates human help — it can manage a small mess alone, but it's slow work. Human removal is instant and earns the +1 relationship point; the spider's own cleaning earns nothing
+------
+Bad weather debris:
+
+Rain and wind speeds up spawning, and lower the stuck threshold that causes fear so storms can realistically overwhelm the spider, needing more support
+------
+
+Relationship weighted web selection — when relationship > 50, the spider will try to draw different, unused or less familiar webs.
+---
+Relationship damaging actions:
+
+Clicking on the spider: it will pick the node furthest from cursor, set that as target, and move there very quickly to get away. -5 relationship
+
+Loud penalty: continuously loud (20s) or 5+ loud events in 1 min past threshold. -10 relationship
