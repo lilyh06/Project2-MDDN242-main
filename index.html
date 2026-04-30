@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Your Creature — MDDN242</title>
+    <title>🕷️ Itsy Bitsy </title>
     <link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><text y='32' font-size='32'>👾</text></svg>">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&family=Lora:wght@400;500&display=swap" rel="stylesheet">
@@ -138,16 +138,38 @@
 
         <!-- ── Influence ── -->
         <div class="control-section">
-            <h3>Influence</h3>
+            <h3>How to interact</h3>
             <ul class="hint-list">
-                <li><span class="key">Debris</span> Remove and collect fallen debris to build trust</li>
-                <li><span class="key">tab away</span> Trust fades the longer you're gone</li>
-                <li><span class="key">loud noise</span> Scares spider into corner (click first to allow mic)</li>
-                <li><span class="key">time away</span> AFK need builds up over hours</li>
-                <li><span class="key">Debris (2–5)</span> Spider becomes frustrated</li>
-                <li><span class="key">Debris (6+)</span> Spider becomes overwhelmed (fear)</li>
-                <li><span class="key">Noise &gt; 50%</span> Spider becomes scared + shakes</li>
-                <li><span class="key">Quiet company</span> Builds trust + relationship</li>
+                <li><span class="key">Click spider</span> Spider flees to far side of web — costs 5 relationship points</li>
+                <li><span class="key">Click canvas</span> Feed the spider — reduces need</li>
+                <li><span class="key">Stay present</span> Quietly watching builds trust and slowly grows relationship</li>
+                <li><span class="key">Tab away</span> Trust fades the longer you're gone; spider worries</li>
+
+                <li><span class="key">Debris</span> Drag fallen debris into the envelope at the bottom to clean the web</li>
+                <li><span class="key">Debris 1–4</span> Spider slowly cleans itself — but appreciates your help (+1 relationship)</li>
+                <li><span class="key">Debris 5–8</span> Spider becomes frustrated — help it out</li>
+                <li><span class="key">Debris 8+</span> Spider becomes overwhelmed and scared</li>
+                <li><span class="key">10 debris</span> A bouquet appears above the envelope — drag it to the spider for +5 relationship</li>
+
+                <li><span class="key">Dragonfly</span> Appears after relationship reaches 15 — drag it onto a web node to feed the spider (+5 relationship)</li>
+                <li><span class="key">Ladybug</span> Faster and harder to catch than the dragonfly — also worth +5 relationship</li>
+                <li><span class="key">Bug in web</span> Spider will walk to it and eat it — stays still until it's done</li>
+
+                <li><span class="key">Bad weather</span> Storm and rain cause debris to fall much faster — hard to keep up alone</li>
+                <li><span class="key">Loud noise</span> Scares spider into corner — first click allows mic</li>
+                <li><span class="key">Loud 20s</span> Continuous loud noise loses 10 relationship points</li>
+                <li><span class="key">5 loud bursts</span> Five noise spikes in one minute loses 10 relationship points</li>
+
+                <li><span class="key">Nap (11pm–5am)</span> Spider sleeps when trusted, relationship &gt; 10, and tab is focused</li>
+                <li><span class="key">Click while napping</span> Wakes spider grumpy — loses relationship</li>
+                <li><span class="key">Loud while napping</span> Also wakes spider grumpy</li>
+                <li><span class="key">Tab away at night</span> Spider wakes up — it wants to be looked after</li>
+
+                <li><span class="key">Relationship 90+</span> Spider trusts you enough not to worry for 10 minutes after you leave</li>
+                <li><span class="key">Return visits</span> Each visit awards +2 relationship (saved between sessions)</li>
+                <li><span class="key">Growth</span> Spider grows slightly bigger as relationship increases</li>
+                <li><span class="key">Eye sparkle</span> Appears when happy/calm and relationship is above 30</li>
+                <li><span class="key">Colour shifts</span> Yellow when calm, purple when scared, orange when neutral</li>
             </ul>
         </div>
 
@@ -216,7 +238,6 @@
         btn.textContent = document.body.classList.contains('dark-mode') ? 'Light mode' : 'Dark mode';
     }
 
-    // Auto-match system theme on first load
     window.addEventListener('DOMContentLoaded', () => {
         const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
         if (prefersDark) {

@@ -30,10 +30,9 @@ new p5(function(p) {
 
     // WEB + DEBRIS
     let debris           = [];
-    let debrisSpawnTimer = 0;
     let selectedDebris   = null;
     let webLayer;
-    let web2Img, web3Img, web4Img;
+    let web2Img, web3Img, web4Img, web5Img;
     let webFade          = 0;
     let webFading        = false;
     let currentWeb       = 1;
@@ -43,7 +42,7 @@ new p5(function(p) {
     let debris1Count     = 0;
     let debris2Count     = 0;
     let recentDebrisFalls = [];
-    let nextDebrisSpawn = 0;   // time until next debris drop 
+    let nextDebrisSpawn  = 0;
 
     // ENVELOPE
     let envelopeImg;
@@ -60,33 +59,70 @@ new p5(function(p) {
     let windActive       = false;
     let spiderBracing    = false;
     let fadeDuration     = 10000;
-    let frustrationPenalty = 0;
     let calmVisitTime    = 0;
     let connectionLevel  = 0;
     let loudEvents       = [];
     let frustrationTimer = 0;
     let stars            = [];
-    let relationshipLevel = 0;  // 0–100 points
-    let fearLevel        = 0;   // 0–1 float
-    let seenWebs         = new Set([1]); // track which web images have been shown; start with web 1
+    let relationshipLevel = 0;
+    let fearLevel        = 0;
+    let seenWebs         = new Set([1]);
+
+    // CLEAR SKY web-change system
+    let clearSkyStart    = null;   // when current clear sky streak began
+    let nextClearWebChange = 0;    // timestamp for next spontaneous web change
+
+    // RAIN WORRY system
+    let rainWorryTimer   = 0;      // frames of rain-induced worry
+
+    // SMILEY FACE debris arrangement
+    let smileyActive     = false;
+    let smileyDebris     = [];     // debris objects placed in smiley pattern
+    let smileyShown      = false;  // only show once per session
 
     // DRAGONFLY
     let dragonflyImg     = null;
+    let nextDragonflySpawn = 0;   // timestamp after which dragonfly re-enters
     let dragonfly = {
-        x: -200, y: 0,
-        speed: 1.8,
-        wiggle: 0,          // wing/body wiggle phase
+        x: -9999, y: 0,          // start off-screen hidden until relationship >= 15
+        speed: 1.0,               // slower than before
+        wiggle: 0,
         size: 70,
-        alive: true,        // false = being eaten
-        stuck: false,       // caught in web
+        alive: true,
+        stuck: false,
         stuckNode: null,
         dragging: false,
         offsetX: 0, offsetY: 0,
-        eatTimer: 0,        // counts up while being eaten, size shrinks
+        eatTimer: 0,
         eaten: false,
-        naturalCatchCooldown: 0,  // prevent instant re-catch
+        naturalCatchCooldown: 0,
+        active: false,            // only true when relationship >= 15
     };
     let selectedDragonfly = false;
+
+    // LADYBUG — faster, harder to catch
+    let ladybugImg       = null;
+    let nextLadybugSpawn = 0;
+    let ladybug = {
+        x: -9999, y: 0,
+        speed: 2.8,               // faster than dragonfly
+        wiggle: 0,
+        size: 45,                 // smaller, harder to grab
+        stuck: false,
+        stuckNode: null,
+        dragging: false,
+        offsetX: 0, offsetY: 0,
+        eaten: false,
+        naturalCatchCooldown: 0,
+        active: false,
+    };
+    let selectedLadybug  = false;
+
+    // SPIDER BODY SHELL overlay image
+    let spiderShellImg   = null;
+
+    // Eating lock — spider freezes while consuming a bug
+    let eatingLock       = false;
 
     // LOUD TRACKING (continuous + burst)
     let loudStartTime    = null;   // when continuous loud streak began
@@ -136,18 +172,37 @@ new p5(function(p) {
 
     function getBackgroundColor() {
         if (!weatherData) return COL_SUNNY_DAY;
-        const hour  = new Date().getHours() + new Date().getMinutes() / 60;
-        let target;
-        if      (hour < 6)  target = COL_NIGHT;
-        else if (hour < 8)  target = COL_SUNSET;
-        else if (hour < 17) target = COL_SUNNY_DAY;
-        else if (hour < 19) target = COL_SUNSET;
-        else                target = COL_NIGHT;
-        let blend = (new Date().getMinutes() % 60) / 60;
+        const hour = new Date().getHours() + new Date().getMinutes() / 60;
+        let from, to, t;
+
+        if (hour < 6) {
+            // Dead of night
+            return COL_NIGHT.slice();
+        } else if (hour < 7) {
+            // Pre-dawn: night → sunrise orange
+            from = COL_NIGHT; to = COL_SUNSET; t = hour - 6;
+        } else if (hour < 8.5) {
+            // Sunrise: orange → day blue
+            from = COL_SUNSET; to = COL_SUNNY_DAY; t = (hour - 7) / 1.5;
+        } else if (hour < 17) {
+            // Daytime
+            return COL_SUNNY_DAY.slice();
+        } else if (hour < 18.5) {
+            // Afternoon → golden sunset
+            from = COL_SUNNY_DAY; to = COL_SUNSET; t = (hour - 17) / 1.5;
+        } else if (hour < 20) {
+            // Sunset → night (quick fade after 6:30pm)
+            from = COL_SUNSET; to = COL_NIGHT; t = (hour - 18.5) / 1.5;
+        } else {
+            // Full night
+            return COL_NIGHT.slice();
+        }
+
+        t = Math.max(0, Math.min(1, t));
         return [
-            p.lerp(COL_SUNNY_DAY[0], target[0], blend),
-            p.lerp(COL_SUNNY_DAY[1], target[1], blend),
-            p.lerp(COL_SUNNY_DAY[2], target[2], blend),
+            p.lerp(from[0], to[0], t),
+            p.lerp(from[1], to[1], t),
+            p.lerp(from[2], to[2], t),
         ];
     }
 
@@ -200,16 +255,16 @@ new p5(function(p) {
 
     const STATES = {
         happy:      { bounceAmt: 0.04,  shakeAmt: 0.0, alphaTarget: 255 },
-        neutral:    { bounceAmt: 0.02,  shakeAmt: 0.0, alphaTarget: 180 },
-        distressed: { bounceAmt: 0.01,  shakeAmt: 0.5, alphaTarget: 127 }, // reduced from 1.5
+        neutral:    { bounceAmt: 0.02,  shakeAmt: 0.0, alphaTarget: 255 },
+        distressed: { bounceAmt: 0.01,  shakeAmt: 0.5, alphaTarget: 255 },
         excited:    { bounceAmt: 0.10,  shakeAmt: 0.0, alphaTarget: 255 },
         calm:       { bounceAmt: 0.015, shakeAmt: 0.0, alphaTarget: 255 },
-        untrusted:  { bounceAmt: 0.015, shakeAmt: 0.3, alphaTarget: 160 },
-        worried:    { bounceAmt: 0.06,  shakeAmt: 0.5, alphaTarget: 200 },
-        frustrated: { bounceAmt: 0.07,  shakeAmt: 0.5, alphaTarget: 200 }, // reduced from 1.0
+        untrusted:  { bounceAmt: 0.015, shakeAmt: 0.3, alphaTarget: 255 },
+        worried:    { bounceAmt: 0.06,  shakeAmt: 0.5, alphaTarget: 255 },
+        frustrated: { bounceAmt: 0.07,  shakeAmt: 0.5, alphaTarget: 255 },
         comfort:    { bounceAmt: 0.01,  shakeAmt: 0.0, alphaTarget: 255 },
-        fear:       { bounceAmt: 0.00,  shakeAmt: 1.0, alphaTarget: 255 }, // reduced from 2.5
-        nap:        { bounceAmt: 0.005, shakeAmt: 0.0, alphaTarget: 220 },
+        fear:       { bounceAmt: 0.00,  shakeAmt: 1.0, alphaTarget: 255 },
+        nap:        { bounceAmt: 0.005, shakeAmt: 0.0, alphaTarget: 255 },
     };
 
     const STATE_DESCRIPTIONS = {
@@ -227,13 +282,14 @@ new p5(function(p) {
     };
 
     function getState(c) {
+        // Fear from debris/loud overrides everything
         if (fearLevel > 0.7)                             return "fear";
         if (fearLevel > 0.4 && c.state !== "frustrated") return "distressed";
 
-        // Nap: nighttime (11pm–5am), trusted, relationship > 10, not scared
+        // Nap: nighttime (11pm–5am), trusted, relationship > 10, tab focused
         let hr = new Date().getHours();
         let isNight = hr >= 23 || hr < 5;
-        if (isNight && c.trustLevel >= 1 && relationshipLevel > 10 && fearLevel < 0.2 && c.isWatched) {
+        if (isNight && c.trustLevel >= 1 && relationshipLevel > 10 && fearLevel < 0.2 && c.isWatched && !eatingLock) {
             return "nap";
         }
 
@@ -242,12 +298,20 @@ new p5(function(p) {
             let worryThreshold = relationshipLevel >= 90 ? 10 : 0;
             if (focusAwayMinutes >= worryThreshold) return "worried";
         }
-        if (c.micLevel > MIC_THRESHOLD)                  return "frustrated";
-        if (c.trustLevel >= 1)                           return "calm";
-        if (c.trustLevel > 0.2)                          return "untrusted";
-        if (c.exciteTimer > 0)                           return "excited";
-        if (c.need <= 30)                                return "happy";
-        if (c.need <= 70)                                return "neutral";
+
+        // Rain worry: prolonged rain (10+ min) makes spider uneasy about its web
+        if (rainWorryTimer > 60 && fearLevel < 0.4) return "worried";
+
+        // Loud mic — but if fearLevel is also elevated, fear wins over frustrated
+        if (c.micLevel > MIC_THRESHOLD) {
+            return fearLevel > 0.2 ? "fear" : "frustrated";
+        }
+
+        if (c.trustLevel >= 1 && relationshipLevel > 10) return "calm";
+        if (c.trustLevel > 0.2)  return "untrusted";
+        if (c.exciteTimer > 0)   return "excited";
+        if (c.need <= 30)        return "happy";
+        if (c.need <= 70)        return "neutral";
         return "distressed";
     }
 
@@ -317,7 +381,10 @@ new p5(function(p) {
         web2Img       = p.loadImage("web2.png");
         web3Img       = p.loadImage("web3.png");
         web4Img       = p.loadImage("web4.png");
+        web5Img       = p.loadImage("web5.png");
         dragonflyImg  = p.loadImage("dragonfly.png");
+        ladybugImg    = p.loadImage("ladybug.png");
+        spiderShellImg = p.loadImage("spidershell.png");
     };
 
 
@@ -352,9 +419,11 @@ new p5(function(p) {
         cloudX = p.width + 200;
         cloudY = p.random(20, p.height * 0.4);
 
-        // Dragonfly starts off-screen to the left at a random height
-        dragonfly.x = -150;
+        // Bugs start hidden; they enter once relationship thresholds are met
+        dragonfly.x = -9999;
         dragonfly.y = p.random(p.height * 0.15, p.height * 0.65);
+        ladybug.x   = -9999;
+        ladybug.y   = p.random(p.height * 0.15, p.height * 0.65);
 
         let startNode = WEB_NODES[creature.currentNode];
         creature.x = startNode.x * p.width;
@@ -504,7 +573,8 @@ new p5(function(p) {
 
         let baseImg = currentWeb === 1 ? webLayer :
                       currentWeb === 2 ? web2Img  :
-                      currentWeb === 3 ? web3Img  : web4Img;
+                      currentWeb === 3 ? web3Img  :
+                      currentWeb === 4 ? web4Img  : web5Img;
         if (baseImg) drawImageNoStretch(baseImg);
 
         // Cross-fade to target web
@@ -513,7 +583,8 @@ new p5(function(p) {
             webFade      = p.constrain(elapsed / fadeDuration, 0, 1);
             let targetImg = targetWeb === 1 ? webLayer :
                             targetWeb === 2 ? web2Img  :
-                            targetWeb === 3 ? web3Img  : web4Img;
+                            targetWeb === 3 ? web3Img  :
+                            targetWeb === 4 ? web4Img  : web5Img;
             if (targetImg) {
                 p.tint(255, webFade * 255);
                 drawImageNoStretch(targetImg);
@@ -611,22 +682,52 @@ if (Date.now() > nextDebrisSpawn) {
 
         // Creature update + draw
         updateMic(creature);
+
+        // ── Clear sky spontaneous web change ──
+        let isClearSky = weatherData && weatherData.current && [0,1].includes(weatherData.current.weather_code);
+        if (isClearSky) {
+            if (clearSkyStart === null) clearSkyStart = Date.now();
+            let clearMinutes = (Date.now() - clearSkyStart) / 60000;
+            // After 60min clear sky, relationship > 20: random chance to change web
+            if (clearMinutes >= 60 && relationshipLevel > 20 && !webFading && Date.now() > nextClearWebChange) {
+                if (p.random() < 0.0003) { // low per-frame chance so it feels spontaneous
+                    startWebFade();
+                    nextClearWebChange = Date.now() + p.random(300000, 600000); // 5–10min cooldown
+                }
+            }
+        } else {
+            clearSkyStart = null;
+        }
+
+        // ── Rain worry after 10 minutes ──
+        let rainMinutesNow = rainStartTime !== null ? (Date.now() - rainStartTime) / 60000 : 0;
+        if (rainMinutesNow > 10) {
+            rainWorryTimer = Math.min(rainWorryTimer + 1, 300);
+        } else {
+            rainWorryTimer = Math.max(0, rainWorryTimer - 2);
+        }
+
+        // ── Smiley face: appears as greeting when relationship >= 30 on first visit back ──
+        if (!smileyShown && relationshipLevel >= 30 && creature.totalVisits > 1 && p.frameCount === 180) {
+            spawnSmileyFace();
+            smileyShown = true;
+        }
+
         updateCreature(creature);
         updateDragonfly();   // update + draw dragonfly (spider renders on top)
+        updateLadybug();     // update + draw ladybug
 
         // Calm company tracking
         if (creature.isWatched && creature.micLevel < 0.05 && frustrationTimer === 0) {
             calmVisitTime++;
             if (calmVisitTime % (60 * 10) === 0) {
-                connectionLevel   = Math.min(1, connectionLevel + 0.05);
-                frustrationPenalty = Math.max(0, frustrationPenalty - 60 * 5);
+                connectionLevel = Math.min(1, connectionLevel + 0.05);
             }
         }
         if (!creature.isWatched) {
             connectionLevel = Math.max(0, connectionLevel - 0.0002);
         }
 
-        // FIX: web trust fade — moved INSIDE p.draw so it runs every frame
         if (!webFading && currentWeb !== 1 && relationshipLevel < 5) {
             targetWeb     = 1;
             webFading     = true;
@@ -654,63 +755,75 @@ if (Date.now() > nextDebrisSpawn) {
     // ============================================================
 
     function resetDragonfly() {
-        dragonfly.x        = -150;
-        dragonfly.y        = p.random(p.height * 0.15, p.height * 0.65);
-        dragonfly.speed    = p.random(1.4, 2.4);
-        dragonfly.alive    = true;
-        dragonfly.stuck    = false;
+        dragonfly.x       = -9999;  // hidden off screen
+        dragonfly.y       = p.random(p.height * 0.15, p.height * 0.65);
+        dragonfly.speed   = p.random(1.4, 2.0);   // slightly faster than before
+        dragonfly.alive   = true;
+        dragonfly.stuck   = false;
         dragonfly.stuckNode = null;
         dragonfly.dragging = false;
         dragonfly.eatTimer = 0;
-        dragonfly.eaten    = false;
-        dragonfly.size     = 70;
-        dragonfly.naturalCatchCooldown = p.random(600, 1800); // 10–30s before it can be caught
+        dragonfly.eaten   = false;
+        dragonfly.size    = 70;
+        dragonfly.naturalCatchCooldown = 0;
+        dragonfly.active  = false;
+        // Long delay before next appearance: 60–120 seconds
+        nextDragonflySpawn = Date.now() + p.random(60000, 120000);
     }
 
     function updateDragonfly() {
         if (!dragonflyImg) return;
 
-        let df = dragonfly;
-        df.wiggle += 0.18; // wing/body animation phase
+        // Gate: only appear when relationship >= 15
+        if (!dragonfly.active && relationshipLevel < 15) return;
 
-        // ── Cooldown tick ──
+        // Activate when delay has passed
+        if (!dragonfly.active && Date.now() > nextDragonflySpawn) {
+            dragonfly.active = true;
+            dragonfly.x      = -150;
+            dragonfly.y      = p.random(p.height * 0.15, p.height * 0.65);
+            dragonfly.naturalCatchCooldown = p.random(900, 2400); // 15–40s cooldown
+        }
+        if (!dragonfly.active) return;
+
+        let df = dragonfly;
+        df.wiggle += 0.12;
+
         if (df.naturalCatchCooldown > 0) df.naturalCatchCooldown--;
 
         // ── Being eaten ──
         if (df.eaten) {
+            eatingLock = true;
             df.eatTimer++;
-            // Spider hovers over it — keep creature positioned here
-            creature.x = p.lerp(creature.x, df.x, 0.05);
-            creature.y = p.lerp(creature.y, df.y, 0.05);
-            df.size = p.lerp(df.size, 0, 0.03);
-            if (df.size < 3) {
-                // Fully eaten — relationship boost, reset dragonfly
-                relationshipLevel = Math.min(100, relationshipLevel + 5);
-                resetDragonfly();
-            }
-            // Draw shrinking dragonfly
+            creature.x = p.lerp(creature.x, df.x, 0.06);
+            creature.y = p.lerp(creature.y, df.y, 0.06);
+            df.size    = p.lerp(df.size, 0, 0.025);
+            // Wiggle while being consumed
+            let wx = Math.sin(df.wiggle * 1.2) * (df.size * 0.08);
+            let wy = Math.cos(df.wiggle * 0.9) * (df.size * 0.05);
             p.push();
-            p.translate(df.x, df.y);
-            p.rotate(Math.sin(df.wiggle * 0.3) * 0.08);
+            p.translate(df.x + wx, df.y + wy);
+            p.rotate(Math.sin(df.wiggle * 0.5) * 0.15);
             p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
             p.pop();
+            if (df.size < 2) {
+                relationshipLevel = Math.min(100, relationshipLevel + 5);
+                eatingLock = false;
+                resetDragonfly();
+            }
             return;
         }
 
         // ── Stuck in web ──
         if (df.stuck) {
-            // Soft wiggle in place
-            let wx = Math.sin(df.wiggle * 0.8) * 3;
-            let wy = Math.cos(df.wiggle * 0.6) * 2;
+            let wx = Math.sin(df.wiggle * 0.7) * 3;
+            let wy = Math.cos(df.wiggle * 0.5) * 2;
             p.push();
             p.translate(df.x + wx, df.y + wy);
-            p.rotate(Math.sin(df.wiggle * 0.4) * 0.12);
+            p.rotate(Math.sin(df.wiggle * 0.35) * 0.1);
             p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
             p.pop();
-
-            // Spider within eating range → start eating
-            let distToSpider = p.dist(creature.x, creature.y, df.x, df.y);
-            if (distToSpider < CREATURE_SIZE * 0.9) {
+            if (p.dist(creature.x, creature.y, df.x, df.y) < 55) {
                 df.eaten = true;
             }
             return;
@@ -727,49 +840,184 @@ if (Date.now() > nextDebrisSpawn) {
             return;
         }
 
-        // ── Flying freely left → right ──
+        // ── Flying freely ──
         df.x += df.speed;
-        // Gentle sine wave vertical drift + wing wiggle
-        df.y += Math.sin(df.wiggle * 0.5) * 0.6;
-
-        // Draw with wing-flap scale pulse and slight rotation
-        let wingScale = 1 + Math.sin(df.wiggle * 2.5) * 0.08;
+        df.y += Math.sin(df.wiggle * 0.4) * 0.5;
+        let wingScale = 1 + Math.sin(df.wiggle * 2.2) * 0.07;
         p.push();
         p.translate(df.x, df.y);
-        p.rotate(Math.sin(df.wiggle * 0.4) * 0.07);
+        p.rotate(Math.sin(df.wiggle * 0.3) * 0.06);
         p.scale(wingScale, 1);
         p.image(dragonflyImg, -df.size / 2, -df.size / 2, df.size, df.size);
         p.pop();
 
-        // ── Natural catch: low probability when dragonfly crosses near a web node ──
+        // ── Natural catch — rare ──
         if (df.naturalCatchCooldown <= 0) {
             for (let n of WEB_NODES) {
-                let nx = n.x * p.width;
-                let ny = n.y * p.height;
-                if (p.dist(df.x, df.y, nx, ny) < 40) {
-                    // ~0.3% chance per frame when within range — feels rare and natural
-                    if (p.random() < 0.003) {
-                        df.stuck     = true;
-                        df.stuckNode = n.id;
-                        df.x         = nx;
-                        df.y         = ny;
-                        creature.returningHome = false; // spider turns toward it
-                        return;
-                    }
+                let nx = n.x * p.width, ny = n.y * p.height;
+                if (p.dist(df.x, df.y, nx, ny) < 35 && p.random() < 0.002) {
+                    df.stuck = true; df.stuckNode = n.id;
+                    df.x = nx; df.y = ny;
+                    return;
                 }
             }
         }
 
-        // ── Loop: wrap back to left when fully off right edge ──
-        if (df.x > p.width + 150) {
-            resetDragonfly();
-        }
+        if (df.x > p.width + 150) resetDragonfly();
     }
 
 
     // ============================================================
-    //  WEB NAVIGATION
+    //  LADYBUG
     // ============================================================
+
+    function resetLadybug() {
+        ladybug.x       = -9999;
+        ladybug.y       = p.random(p.height * 0.1, p.height * 0.7);
+        ladybug.speed   = p.random(2.4, 3.6);   // fast
+        ladybug.stuck   = false;
+        ladybug.stuckNode = null;
+        ladybug.dragging = false;
+        ladybug.eaten   = false;
+        ladybug.size    = 45;
+        ladybug.naturalCatchCooldown = 0;
+        ladybug.active  = false;
+        // Ladybug appears less often than dragonfly
+        nextLadybugSpawn = Date.now() + p.random(90000, 180000);
+    }
+
+    function updateLadybug() {
+        if (!ladybugImg) return;
+
+        // Gate: same relationship threshold as dragonfly
+        if (!ladybug.active && relationshipLevel < 15) return;
+
+        if (!ladybug.active && Date.now() > nextLadybugSpawn) {
+            ladybug.active = true;
+            ladybug.x      = -80;
+            ladybug.y      = p.random(p.height * 0.1, p.height * 0.7);
+            ladybug.naturalCatchCooldown = p.random(1200, 3000); // very long — hard to catch
+        }
+        if (!ladybug.active) return;
+
+        let lb = ladybug;
+        lb.wiggle += 0.22;  // faster wing wiggle
+
+        if (lb.naturalCatchCooldown > 0) lb.naturalCatchCooldown--;
+
+        // ── Being eaten ──
+        if (lb.eaten) {
+            eatingLock = true;
+            lb.size    = p.lerp(lb.size, 0, 0.028);
+            creature.x = p.lerp(creature.x, lb.x, 0.07);
+            creature.y = p.lerp(creature.y, lb.y, 0.07);
+            let wx = Math.sin(lb.wiggle * 1.5) * (lb.size * 0.1);
+            let wy = Math.cos(lb.wiggle * 1.1) * (lb.size * 0.06);
+            p.push();
+            p.translate(lb.x + wx, lb.y + wy);
+            p.rotate(Math.sin(lb.wiggle * 0.6) * 0.18);
+            p.image(ladybugImg, -lb.size / 2, -lb.size / 2, lb.size, lb.size);
+            p.pop();
+            if (lb.size < 2) {
+                relationshipLevel = Math.min(100, relationshipLevel + 5);
+                eatingLock = false;
+                resetLadybug();
+            }
+            return;
+        }
+
+        // ── Stuck in web ──
+        if (lb.stuck) {
+            let wx = Math.sin(lb.wiggle * 1.0) * 2.5;
+            let wy = Math.cos(lb.wiggle * 0.8) * 1.5;
+            p.push();
+            p.translate(lb.x + wx, lb.y + wy);
+            p.rotate(Math.sin(lb.wiggle * 0.5) * 0.14);
+            p.image(ladybugImg, -lb.size / 2, -lb.size / 2, lb.size, lb.size);
+            p.pop();
+            if (p.dist(creature.x, creature.y, lb.x, lb.y) < 45) {
+                lb.eaten = true;
+            }
+            return;
+        }
+
+        // ── Dragging by user ──
+        if (lb.dragging) {
+            lb.x = p.mouseX + lb.offsetX;
+            lb.y = p.mouseY + lb.offsetY;
+            p.push();
+            p.translate(lb.x, lb.y);
+            p.image(ladybugImg, -lb.size / 2, -lb.size / 2, lb.size, lb.size);
+            p.pop();
+            return;
+        }
+
+        // ── Flying freely — fast, erratic ──
+        lb.x += lb.speed;
+        lb.y += Math.sin(lb.wiggle * 0.7) * 1.0;  // more erratic vertical wobble
+        let wingScale = 1 + Math.sin(lb.wiggle * 3.0) * 0.06;
+        p.push();
+        p.translate(lb.x, lb.y);
+        p.rotate(Math.sin(lb.wiggle * 0.5) * 0.09);
+        p.scale(wingScale, 1);
+        p.image(ladybugImg, -lb.size / 2, -lb.size / 2, lb.size, lb.size);
+        p.pop();
+
+        // ── Natural catch — very rare (harder than dragonfly) ──
+        if (lb.naturalCatchCooldown <= 0) {
+            for (let n of WEB_NODES) {
+                let nx = n.x * p.width, ny = n.y * p.height;
+                if (p.dist(lb.x, lb.y, nx, ny) < 25 && p.random() < 0.001) {
+                    lb.stuck = true; lb.stuckNode = n.id;
+                    lb.x = nx; lb.y = ny;
+                    return;
+                }
+            }
+        }
+
+        if (lb.x > p.width + 100) resetLadybug();
+    }
+
+
+    // ============================================================
+    //  SMILEY FACE DEBRIS ARRANGEMENT
+    // ============================================================
+
+    function spawnSmileyFace() {
+        // Place debris in a smiley face pattern around web centre
+        // Uses fixed node positions to approximate eyes + smile
+        let cx = p.width  * 0.55;
+        let cy = p.height * 0.40;
+        let r  = 60;
+
+        // Two eyes
+        let eyePositions = [
+            { x: cx - 22, y: cy - 18 },
+            { x: cx + 22, y: cy - 18 },
+        ];
+        // Smile arc — 5 points
+        let smileAngles = [-0.6, -0.3, 0, 0.3, 0.6];
+        let smilePositions = smileAngles.map(a => ({
+            x: cx + Math.sin(a) * r * 0.55,
+            y: cy + 14 + Math.cos(a) * -14,
+        }));
+
+        for (let pos of [...eyePositions, ...smilePositions]) {
+            let img = p.random([debrisImg1, debrisImg2]);
+            let d = {
+                x: pos.x, y: pos.y,
+                img, size: p.random(20, 30),
+                speed: 0, rotation: 0, angle: 0,
+                stuck: true, stuckNode: null,
+                dragging: false, released: false,
+                offsetX: 0, offsetY: 0,
+                isSmiley: true,   // flag so it can't be auto-cleaned
+            };
+            debris.push(d);
+            smileyDebris.push(d);
+        }
+        smileyActive = true;
+    }
 
     function getNeighbours(nodeId) {
         let neighbours = [];
@@ -793,6 +1041,26 @@ if (Date.now() > nextDebrisSpawn) {
     function pickNextNode(c) {
         let neighbours = getNeighbours(c.currentNode);
         if (neighbours.length === 0) return c.currentNode;
+
+        // Chase nearest stuck bug (dragonfly or ladybug)
+        let bugTarget = null;
+        let bugDist   = Infinity;
+        for (let bug of [dragonfly, ladybug]) {
+            if (bug.stuck && !bug.eaten) {
+                let d = p.dist(c.x, c.y, bug.x, bug.y);
+                if (d < bugDist) { bugDist = d; bugTarget = bug; }
+            }
+        }
+        if (bugTarget) {
+            // Move toward the node nearest to the stuck bug
+            return neighbours.sort((a, b) => {
+                let na = WEB_NODES[a], nb = WEB_NODES[b];
+                let da = p.dist(na.x * p.width, na.y * p.height, bugTarget.x, bugTarget.y);
+                let db = p.dist(nb.x * p.width, nb.y * p.height, bugTarget.x, bugTarget.y);
+                return da - db;
+            })[0];
+        }
+
         switch (c.state) {
             case 'happy':
             case 'neutral': {
@@ -864,6 +1132,12 @@ if (c.celebrateTimer > 0) {
         }
         c.napping = false;
 
+        // Freeze on eating — spider stays still until bug is consumed
+        if (eatingLock) {
+            c.breathe += 0.018;
+            return;
+        }
+
         // Frustration cooldown
         if (frustrationTimer > 0) {
             frustrationTimer = Math.floor(frustrationTimer * 0.995) - 1;
@@ -932,14 +1206,11 @@ if (c.celebrateTimer > 0) {
         }
 
         // Self-cleaning: if fewer than 5 debris stuck, spider slowly removes one
-        // when it arrives at a node that has debris on it (why it values human help)
         if (stuckCount > 0 && stuckCount < 5) {
             let currentNodeId = c.currentNode;
-            let debrisHere = debris.find(d => d.stuck && d.stuckNode === currentNodeId);
+            let debrisHere = debris.find(d => d.stuck && d.stuckNode === currentNodeId && !d.isSmiley);
             if (debrisHere && !c.selfCleanCooldown) {
-                // Spider pauses briefly then removes the debris
-                c.selfCleanCooldown = 300; // ~5 seconds at 60fps before it can clean again
-                // Delay the actual removal by 120 frames so it looks intentional
+                c.selfCleanCooldown = 300;
                 debrisHere.selfCleanTimer = 120;
             }
         }
@@ -999,7 +1270,7 @@ if (c.celebrateTimer > 0) {
             y:        -20,
             img:      img,
             size:     p.random(28, 48),
-            speed:    p.random(0.8, 1.8),  // reduced from (2.2, 4.0) — falls slower
+            speed:    p.random(0.4, 1.0),  // slower fall, rotates as it falls
             rotation: p.random(-0.1, 0.1),
             angle:    0,
             stuck:    false,
@@ -1055,8 +1326,9 @@ if (c.celebrateTimer > 0) {
                 continue;
             }
 
-            // Falling
-            d.y += d.speed;
+            // Falling — slower speed, rotates as it falls
+            d.y     += d.speed;
+            d.angle += d.rotation;   // accumulate rotation each frame
             anyFalling = true;
 
             // Stick to nearest node
@@ -1068,11 +1340,17 @@ if (c.celebrateTimer > 0) {
                     d.stuckNode = n.id;
                     d.x         = nx;
                     d.y         = ny;
+                    d.angle     = 0; // reset rotation when stuck
                     break;
                 }
             }
 
-            p.image(d.img, d.x - d.size / 2, d.y - d.size / 2, d.size, d.size);
+            // Draw with accumulated rotation
+            p.push();
+            p.translate(d.x, d.y);
+            p.rotate(d.angle);
+            p.image(d.img, -d.size / 2, -d.size / 2, d.size, d.size);
+            p.pop();
         }
 
         // Track rapid debris falls — only scary if already overwhelmed (>5 stuck)
@@ -1093,33 +1371,31 @@ if (c.celebrateTimer > 0) {
     // ============================================================
 
     function startWebFade() {
-        // All available web indices (expand this list as you add more web images)
-        const ALL_WEBS = [1, 2, 3, 4];
+        const ALL_WEBS = [1, 2, 3, 4, 5];
 
-        // Relationship > 50: bias toward webs the spider hasn't shown before
         if (relationshipLevel >= 50) {
+            // Prefer unseen webs first
             let unseen = ALL_WEBS.filter(w => !seenWebs.has(w) && w !== currentWeb);
             if (unseen.length > 0) {
-                // Prefer an unseen web — spider is comfortable enough to share something new
                 targetWeb = p.random(unseen);
             } else {
-                // All webs seen — pick any non-current one at random
                 let opts = ALL_WEBS.filter(w => w !== currentWeb);
                 targetWeb = p.random(opts);
             }
+        } else if (relationshipLevel >= 20) {
+            // Mid relationship — webs 1–3
+            let opts = [1, 2, 3].filter(w => w !== currentWeb);
+            targetWeb = p.random(opts);
         } else {
-            // Low relationship — stick to the basics (web 2 or 3 only)
-            if (creature.state === "calm")            targetWeb = 2;
-            else if (creature.state === "frustrated") targetWeb = 3;
-            else                                      targetWeb = 2;
+            // Low relationship — web 2 only
+            targetWeb = currentWeb !== 2 ? 2 : 1;
         }
 
-        seenWebs.add(targetWeb); // mark this web as seen
-
+        seenWebs.add(targetWeb);
         webFading     = true;
         fadeStartTime = Date.now();
         webFade       = 0;
-        fadeDuration  = 15000;  // was 20s — a few seconds shorter
+        fadeDuration  = 15000;
         creature.exciteTimer = 600;
     }
 
@@ -1316,7 +1592,6 @@ if (c.celebrateTimer > 0) {
         let br = c ? c.bodyR : 255;
         let bg = c ? c.bodyG : 126;
         let bb = c ? c.bodyB : 0;
-        // Secondary colour (head): slightly darker version of body colour
         let hr = br * 0.75, hg = bg * 0.67, hb = bb * 0.6;
         p.noStroke();
         p.fill(br, bg, bb, alpha);
@@ -1331,20 +1606,29 @@ if (c.celebrateTimer > 0) {
         p.noStroke();
         p.fill(...BLACK, alpha);
         p.ellipse(0, 1, 7, 6);
+
+        // Shell overlay on abdomen — centred over the butt ellipse
+        if (spiderShellImg) {
+            p.tint(255, alpha);
+            p.image(spiderShellImg, -16, -2, 32, 30);
+            p.noTint();
+        }
     }
 
     function drawEyes(c, alpha, isNapping) {
-        // Eyes follow dragonfly if it's on screen and closer than the cursor
+        // Eyes follow the nearest visible bug if closer than the cursor
         let targetX = p.mouseX;
         let targetY = p.mouseY;
-        if (dragonflyImg && !dragonfly.eaten) {
-            let dfDist    = p.dist(c.x, c.y, dragonfly.x, dragonfly.y);
-            let mouseDist = p.dist(c.x, c.y, p.mouseX, p.mouseY);
-            if (dragonfly.x > -50 && dragonfly.x < p.width + 50 && dfDist < mouseDist) {
-                targetX = dragonfly.x;
-                targetY = dragonfly.y;
-            }
+        let mouseDist = p.dist(c.x, c.y, p.mouseX, p.mouseY);
+
+        function checkBug(bug) {
+            if (!bug.active || bug.eaten) return;
+            if (bug.x < -200 || bug.x > p.width + 200) return;
+            let bd = p.dist(c.x, c.y, bug.x, bug.y);
+            if (bd < mouseDist) { targetX = bug.x; targetY = bug.y; mouseDist = bd; }
         }
+        if (dragonflyImg) checkBug(dragonfly);
+        if (ladybugImg)   checkBug(ladybug);
         let dx    = targetX - c.x;
         let dy    = targetY - c.y;
         let angle = Math.atan2(dy, dx);
@@ -1410,6 +1694,18 @@ if (c.celebrateTimer > 0) {
         let d = p.dist(p.mouseX, p.mouseY, creature.x, creature.y);
 
         if (d < CREATURE_SIZE * 0.7) {
+            // Wake napping spider — becomes grumpy
+            if (creature.state === "nap") {
+                creature.state    = "frustrated";
+                frustrationTimer  = 60 * 45;      // ~45s of grumpiness
+                creature.napping  = false;
+                relationshipLevel = Math.max(0, relationshipLevel - 3);
+                return;
+            }
+
+            // Don't interact while eating
+            if (eatingLock) return;
+
             // Clicked directly on spider — it flees to the furthest node from cursor
             let farNode = WEB_NODES.reduce((best, n) => {
                 let nd = p.dist(n.x * p.width, n.y * p.height, p.mouseX, p.mouseY);
@@ -1422,20 +1718,17 @@ if (c.celebrateTimer > 0) {
             creature.edgeT         = 0;
             creature.returningHome = false;
 
-            // Brief speed burst so the flee looks snappy
             travelSpeed = BASE_SPEED * 5;
             setTimeout(() => { travelSpeed = BASE_SPEED; }, 1200);
 
-            // Relationship penalty: -5 points if any have been earned
             if (relationshipLevel > 0) {
                 relationshipLevel = Math.max(0, relationshipLevel - 5);
             }
-            // Feeding click only applies when NOT clicking on spider directly
             return;
         }
 
         // Normal feed click (not on spider)
-        creature.need = p.max(0, creature.need - CLICK_FEED);
+        if (!eatingLock) creature.need = p.max(0, creature.need - CLICK_FEED);
     }
 
 
@@ -1444,13 +1737,22 @@ if (c.celebrateTimer > 0) {
     // ============================================================
 
     p.mousePressed = function() {
-        // Dragonfly grab — if flying freely and user clicks on it
-        if (dragonflyImg && !dragonfly.stuck && !dragonfly.eaten && !dragonfly.dragging) {
+        // Dragonfly grab
+        if (dragonflyImg && dragonfly.active && !dragonfly.stuck && !dragonfly.eaten && !dragonfly.dragging) {
             if (p.dist(p.mouseX, p.mouseY, dragonfly.x, dragonfly.y) < dragonfly.size * 0.7) {
                 dragonfly.dragging = true;
                 dragonfly.offsetX  = dragonfly.x - p.mouseX;
                 dragonfly.offsetY  = dragonfly.y - p.mouseY;
                 selectedDragonfly  = true;
+            }
+        }
+        // Ladybug grab — smaller hit zone (harder to catch)
+        if (ladybugImg && ladybug.active && !ladybug.stuck && !ladybug.eaten && !ladybug.dragging) {
+            if (p.dist(p.mouseX, p.mouseY, ladybug.x, ladybug.y) < ladybug.size * 0.55) {
+                ladybug.dragging = true;
+                ladybug.offsetX  = ladybug.x - p.mouseX;
+                ladybug.offsetY  = ladybug.y - p.mouseY;
+                selectedLadybug  = true;
             }
         }
 
@@ -1477,6 +1779,10 @@ if (c.celebrateTimer > 0) {
             dragonfly.x = p.mouseX + dragonfly.offsetX;
             dragonfly.y = p.mouseY + dragonfly.offsetY;
         }
+        if (ladybug.dragging) {
+            ladybug.x = p.mouseX + ladybug.offsetX;
+            ladybug.y = p.mouseY + ladybug.offsetY;
+        }
         if (bouquet && bouquet.dragging) {
             bouquet.x = p.mouseX + bouquet.offsetX;
             bouquet.y = p.mouseY + bouquet.offsetY;
@@ -1488,27 +1794,36 @@ if (c.celebrateTimer > 0) {
     };
 
     p.mouseReleased = function() {
-        // Dragonfly release — snap to nearest web node if dropped close enough
+        // Dragonfly release — snap to nearest web node
         if (dragonfly.dragging) {
             dragonfly.dragging = false;
             selectedDragonfly  = false;
             let snapped = false;
             for (let n of WEB_NODES) {
-                let nx = n.x * p.width;
-                let ny = n.y * p.height;
-                if (p.dist(dragonfly.x, dragonfly.y, nx, ny) < 50) {
-                    dragonfly.stuck     = true;
-                    dragonfly.stuckNode = n.id;
-                    dragonfly.x         = nx;
-                    dragonfly.y         = ny;
-                    snapped = true;
-                    break;
+                let nx = n.x * p.width, ny = n.y * p.height;
+                if (p.dist(dragonfly.x, dragonfly.y, nx, ny) < 55) {
+                    dragonfly.stuck = true; dragonfly.stuckNode = n.id;
+                    dragonfly.x = nx; dragonfly.y = ny;
+                    snapped = true; break;
                 }
             }
-            if (!snapped) {
-                // Not near a node — release it to fly on freely
-                dragonfly.stuck = false;
+            if (!snapped) dragonfly.stuck = false;
+        }
+
+        // Ladybug release — smaller snap radius (harder)
+        if (ladybug.dragging) {
+            ladybug.dragging = false;
+            selectedLadybug  = false;
+            let snapped = false;
+            for (let n of WEB_NODES) {
+                let nx = n.x * p.width, ny = n.y * p.height;
+                if (p.dist(ladybug.x, ladybug.y, nx, ny) < 35) {
+                    ladybug.stuck = true; ladybug.stuckNode = n.id;
+                    ladybug.x = nx; ladybug.y = ny;
+                    snapped = true; break;
+                }
             }
+            if (!snapped) ladybug.stuck = false;
         }
 
 // Bouquet drop
@@ -1527,12 +1842,14 @@ if (bouquet && bouquet.dragging) {
 
         // Celebration circles + web drawing
         creature.orbitAngle = 0;
-        creature.celebrateTimer = 300; // 5 seconds
+        creature.celebrateTimer = 300;
         startWebFade();
 
-        // Remove bouquet
+        // Remove bouquet AND reset debris counters so 10 more are needed
         bouquetAvailable = false;
-        bouquet = null;
+        bouquet          = null;
+        debris1Count     = 0;
+        debris2Count     = 0;
     }
 }
 
@@ -1603,11 +1920,19 @@ if (bouquet && bouquet.dragging) {
         let now = Date.now();
 
         if (c.micLevel > MIC_THRESHOLD) {
+            // Wake napping spider with grumpiness
+            if (c.state === "nap") {
+                c.state          = "frustrated";
+                frustrationTimer = 60 * 45;
+                c.napping        = false;
+                relationshipLevel = Math.max(0, relationshipLevel - 3);
+            }
+
             // Existing frustration logic
             loudEvents.push(now);
             loudEvents = loudEvents.filter(t => now - t < 60000);
             if (loudEvents.length >= 3) { frustrationTimer = 60 * 60; loudEvents = []; }
-            if (c.micLevel * 100 > 50) fearLevel = Math.min(1, fearLevel + 0.15);
+            if (c.micLevel * 100 > 50) fearLevel = Math.min(1, fearLevel + 0.25); // raises fast enough to trigger fear shake
             c.freezeTimer   = 120;
             c.returningHome = true;
 
@@ -1795,9 +2120,10 @@ if (bouquet && bouquet.dragging) {
     //  SIDEBAR CONTROLS
     // ============================================================
 
-    window._resetNeed = () => { if (creature) creature.need = 0; };
-    window._maxNeed   = () => { if (creature) creature.need = 100; };
-    window._setDecay  = v  => { DECAY_RATE = v; };
-    window._setFeed   = v  => { CLICK_FEED = v; };
+    window._resetNeed         = () => { if (creature) creature.need = 0; };
+    window._maxNeed           = () => { if (creature) creature.need = 100; };
+    window._setDecay          = v  => { DECAY_RATE = v; };
+    window._setFeed           = v  => { CLICK_FEED = v; };
+    window._resetRelationship = () => { relationshipLevel = 0; };
 
 }, document.body);
